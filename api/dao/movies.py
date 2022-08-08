@@ -61,11 +61,29 @@ class MovieDAO:
     # tag::getByGenre[]
 
     def get_by_genre(self, name, sort='title', order='ASC', limit=6, skip=0, user_id=None):
-        # TODO: Get Movies in a Genre
-        # TODO: The Cypher string will be formated so remember to escape the braces: {{name: $name}}
-        # MATCH (m:Movie)-[:IN_GENRE]->(:Genre {name: $name})
+        # Get Movies in a Genre
+        def get_movies_in_genre(tx, sort, order, limit, skip, user_id):
+            favorites = self.get_user_favorites(tx, user_id)
+            cypher = """
+                MATCH (m:Movie)-[:IN_GENRE]->(:Genre {{name: $name}})
+                WHERE exists(m.`{0}`)
+                RETURN m {{
+                    .*,
+                    favorite: m.tmdbId in $favorites
+                }} AS movie
+                ORDER BY m.`{0}` {1}
+                SKIP $skip
+                LIMIT $limit
+            """.format(sort, order)
 
-        return popular[skip:limit]
+            result = tx.run(cypher, name=name, limit=limit,
+                            skip=skip, user_id=user_id, favorites=favorites)
+
+            return [row.get("movie") for row in result]
+        # The Cypher string will be formated so remember to escape the braces: {{name: $name}}
+
+        with self.driver.session() as session:
+            return session.read_transaction(get_movies_in_genre, sort, order, limit=limit, skip=skip, user_id=user_id)
     # end::getByGenre[]
 
     """
@@ -83,11 +101,29 @@ class MovieDAO:
     # tag::getForActor[]
 
     def get_for_actor(self, id, sort='title', order='ASC', limit=6, skip=0, user_id=None):
-        # TODO: Get Movies for an Actor
-        # TODO: The Cypher string will be formated so remember to escape the braces: {{tmdbId: $id}}
-        # MATCH (:Person {tmdbId: $id})-[:ACTED_IN]->(m:Movie)
+        # Get Movies for an Actor
+        # The Cypher string will be formated so remember to escape the braces: {{tmdbId: $id}}
+        def get_movies_for_actor(tx, id, sort, order, limit, skip, user_id):
+            favorites = self.get_user_favorites(tx, user_id)
+            cypher = """
+                MATCH (:Person {{tmdbId: $id}})-[:ACTED_IN]->(m:Movie)
+                WHERE exists(m.`{0}`)
+                RETURN m {{
+                    .*,
+                    favorite: m.tmdbId in $favorites
+                }} AS movie
+                ORDER BY m.`{0}` {1}
+                SKIP $skip
+                LIMIT $limit
+            """.format(sort, order)
 
-        return popular[skip:limit]
+            result = tx.run(cypher, id=id, limit=limit,
+                            skip=skip, user_id=user_id, favorites=favorites)
+
+            return [row.get("movie") for row in result]
+
+        with self.driver.session()as session:
+            return session.read_transaction(get_movies_for_actor, id, sort, order, limit=limit, skip=skip, user_id=user_id)
     # end::getForActor[]
 
     """
@@ -105,11 +141,27 @@ class MovieDAO:
     # tag::getForDirector[]
 
     def get_for_director(self, id, sort='title', order='ASC', limit=6, skip=0, user_id=None):
-        # TODO: Get Movies directed by a Person
-        # TODO: The Cypher string will be formated so remember to escape the braces: {{name: $name}}
-        # MATCH (:Person {tmdbId: $id})-[:DIRECTED]->(m:Movie)
+        # Get Movies directed by a Person
+        def get_movies_for_director(tx, id, sort, order, limit, skip, user_id):
+            favorites = self.get_user_favorites(tx, user_id)
+            cypher = """
+                MATCH (:Person {{tmdbId: $id}})-[:DIRECTED]->(m:Movie)
+                WHERE exists(m.`{0}`)
+                RETURN m {{
+                    .*,
+                    favorite: m.tmdbId in $favorites
+                }} AS movie
+                ORDER BY m.`{0}` {1}
+                SKIP $skip
+                LIMIT $limit
+            """.format(sort, order)
 
-        return popular[skip:limit]
+            result = tx.run(cypher, id=id, limit=limit, skip=skip,
+                            user_id=user_id, favorites=favorites)
+            return [row.get("movie") for row in result]
+
+        with self.driver.session() as session:
+            return session.read_transaction(get_movies_for_director, id, sort, order, limit=limit, skip=skip, user_id=user_id)
     # end::getForDirector[]
 
     """
@@ -124,10 +176,30 @@ class MovieDAO:
     # tag::findById[]
 
     def find_by_id(self, id, user_id=None):
-        # TODO: Find a movie by its ID
-        # MATCH (m:Movie {tmdbId: $id})
+        # Find a movie by its ID
+        def find_movie_by_id(tx, id, user_id=None):
+            favorites = self.get_user_favorites(tx, user_id)
+            cypher = """
+            MATCH (m:Movie {tmdbId: $id})
+            RETURN m {
+            .*,
+            actors: [ (a)-[r:ACTED_IN]->(m) | a { .*, role: r.role } ],
+            directors: [ (d)-[:DIRECTED]->(m) | d { .* } ],
+            genres: [ (m)-[:IN_GENRE]->(g) | g { .name }],
+            favorite: m.tmdbId IN $favorites
+                } AS movie
+            LIMIT 1
+            """
 
-        return goodfellas
+            first = tx.run(cypher, id=id, favorites=favorites).single()
+
+            if first == None:
+                raise NotFoundException()
+
+            return first.get("movie")
+
+        with self.driver.session() as session:
+            return session.read_transaction(find_movie_by_id, id, user_id)
     # end::findById[]
 
     """
@@ -146,9 +218,34 @@ class MovieDAO:
     # tag::getSimilarMovies[]
 
     def get_similar_movies(self, id, limit=6, skip=0, user_id=None):
-        # TODO: Get similar movies from Neo4j
+        # Get similar movies from Neo4j
+        def find_similar_movie(tx, id, limit, skip, user_id):
+            favorites = self.get_user_favorites(tx, user_id)
+            cypher = """ 
+            MATCH (:Movie {tmdbId: $id})-[:IN_GENRE|ACTED_IN|DIRECTED]->()<-[:IN_GENRE|ACTED_IN|DIRECTED]-(m)
+            WHERE m.imdbRating IS NOT NULL
 
-        return popular[skip:limit]
+            WITH m, count(*) AS inCommon
+            WITH m, inCommon, m.imdbRating * inCommon AS score
+            ORDER BY score DESC
+
+            SKIP $skip
+            LIMIT $limit
+
+            RETURN m {
+                .*,
+                score: score,
+                favorite: m.tmdbId IN $favorites
+            } AS movie
+                
+            """
+
+            result = tx.run(cypher, id=id, limit=limit,
+                            skip=skip, favorites=favorites)
+
+            return [row.get("movie") for row in result]
+        with self.driver.session() as session:
+            return session.read_transaction(find_similar_movie, id, limit, skip, user_id)
     # end::getSimilarMovies[]
 
     """
